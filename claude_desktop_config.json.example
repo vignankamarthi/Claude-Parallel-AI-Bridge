@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "parallel-research": {
+      "command": "python",
+      "args": [
+        "<PATH_TO_PROJECT>/server.py"
+      ],
+      "env": {
+        "PARALLEL_API_KEY": "${PARALLEL_API_KEY}"
+      }
+    }
+  }
+}
