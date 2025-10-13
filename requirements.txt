@@ -1,8 +1,7 @@
 # Parallel AI MCP Server Requirements
 
 # Core MCP Framework
-mcp>=1.0.0
-fastmcp>=0.2.0
+mcp @ git+https://github.com/modelcontextprotocol/python-sdk.git
 
 # Parallel AI SDK
 parallel-web>=0.2.0
