@@ -101,7 +101,7 @@ async def app_lifespan(server: FastMCP):
 
 # Initialize MCP server
 mcp = FastMCP(
-    "Parallel Architecture Research", lifespan=app_lifespan, request_timeout=360
+    "Parallel Architecture Research", lifespan=app_lifespan
 )
 
 
