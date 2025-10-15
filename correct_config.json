@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/vkamarthi24/Desktop",
+        "/Users/vkamarthi24/Downloads"
+      ]
+    },
+    "parallel-research": {
+      "command": "/Users/vkamarthi24/Desktop/Personal Projects/2025-2026/Claude-Parallel-AI Integration/venv/bin/python",
+      "args": [
+        "/Users/vkamarthi24/Desktop/Personal Projects/2025-2026/Claude-Parallel-AI Integration/server.py"
+      ],
+      "env": {
+        "PARALLEL_API_KEY": "${PARALLEL_API_KEY}"
+      }
+    }
+  }
+}

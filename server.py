@@ -10,7 +10,6 @@ Author: Vignan Kamarthi
 
 import os
 import asyncio
-import logging
 from contextlib import asynccontextmanager
 from typing import Dict, Any
 from dotenv import load_dotenv
@@ -19,19 +18,14 @@ from pydantic import BaseModel, Field
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(funcName)s() - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("ParallelMCP")
+# Import comprehensive logging system
+from utils.logger import SystemLogger, log_entry, log_exit, log_progress
 
 # MCP imports
 try:
     from mcp.server.fastmcp import FastMCP, Context
 except ImportError:
-    logger.error("FastMCP not installed")
+    SystemLogger.error("FastMCP not installed", context={"module": "mcp.server.fastmcp"})
     print("ERROR: FastMCP not installed. Run: pip install mcp fastmcp")
     exit(1)
 
@@ -74,29 +68,49 @@ async def app_lifespan(server: FastMCP):
     """
     global parallel_client
 
+    log_entry("app_lifespan")
+
     api_key = os.getenv("PARALLEL_API_KEY")
-    logger.info("Initializing Parallel AI MCP Server")
+    SystemLogger.info("Initializing Parallel AI MCP Server", {
+        "api_key_configured": bool(api_key and api_key != "your_parallel_api_key_here"),
+        "server_type": type(server).__name__
+    })
 
     if not api_key or api_key == "your_parallel_api_key_here":
-        logger.warning("PARALLEL_API_KEY not configured - running in mock mode")
+        SystemLogger.warning("PARALLEL_API_KEY not configured - running in mock mode", {
+            "api_key_present": bool(api_key),
+            "is_placeholder": api_key == "your_parallel_api_key_here" if api_key else False
+        })
         parallel_client = None
     else:
         try:
             import parallel
 
             parallel_client = parallel.Parallel(api_key=api_key)
-            logger.info("Parallel AI client initialized successfully")
-        except ImportError:
-            logger.error("parallel-web package not installed")
+            SystemLogger.info("Parallel AI client initialized successfully", {
+                "client_type": type(parallel_client).__name__,
+                "api_key_length": len(api_key)
+            })
+        except ImportError as e:
+            SystemLogger.error(
+                "parallel-web package not installed",
+                exception=e,
+                context={"package": "parallel-web", "install_command": "pip install parallel-web"}
+            )
             parallel_client = None
         except Exception as e:
-            logger.error(f"Failed to initialize Parallel client: {e}")
+            SystemLogger.error(
+                "Failed to initialize Parallel client",
+                exception=e,
+                context={"api_key_length": len(api_key) if api_key else 0}
+            )
             parallel_client = None
 
     try:
+        log_exit("app_lifespan", {"parallel_configured": parallel_client is not None})
         yield {"parallel": parallel_client}
     finally:
-        logger.info("Shutting down Parallel AI MCP Server")
+        SystemLogger.info("Shutting down Parallel AI MCP Server")
 
 
 # Initialize MCP server
@@ -162,7 +176,16 @@ async def research_architecture_decision(
     ...     processor="pro"
     ... )
     """
-    logger.info(f"Research request: query='{query}', processor='{processor}'")
+    log_entry("research_architecture_decision", {
+        "query": query[:100] if query else "",
+        "processor": processor
+    })
+
+    SystemLogger.info("Research request received", {
+        "query_length": len(query),
+        "processor": processor,
+        "query_preview": query[:50] + "..." if len(query) > 50 else query
+    })
 
     # Validate processor
     valid_processors = [
@@ -177,7 +200,11 @@ async def research_architecture_decision(
         "ultra8x",
     ]
     if processor not in valid_processors:
-        logger.warning(f"Invalid processor '{processor}', defaulting to 'pro'")
+        SystemLogger.warning(f"Invalid processor '{processor}', defaulting to 'pro'", {
+            "requested_processor": processor,
+            "valid_processors": valid_processors,
+            "default": "pro"
+        })
         processor = "pro"
 
     # Cost and time estimates
@@ -205,7 +232,11 @@ async def research_architecture_decision(
     }
 
     # Request user approval
-    logger.info("Requesting user approval for research task")
+    SystemLogger.debug("Requesting user approval for research task", {
+        "processor": processor,
+        "cost": cost_map.get(processor, "unknown"),
+        "time": time_map.get(processor, "unknown")
+    })
     approval = await ctx.elicit(
         message=f"""
 APPROVAL REQUIRED
@@ -221,12 +252,20 @@ Approve this research task?
     )
 
     if not approval.data.approved:
-        logger.info("Research cancelled by user")
+        SystemLogger.info("Research cancelled by user", {
+            "query": query[:50],
+            "processor": processor
+        })
+        log_exit("research_architecture_decision", {"status": "cancelled"})
         return {"status": "cancelled", "message": "Research cancelled by user"}
 
     # Check client availability
     if parallel_client is None:
-        logger.error("Parallel AI client not configured")
+        SystemLogger.error("Parallel AI client not configured", context={
+            "processor": processor,
+            "help": "Set PARALLEL_API_KEY in .env file"
+        })
+        log_exit("research_architecture_decision", {"status": "error"})
         return {
             "status": "error",
             "message": "Parallel AI client not configured. Set PARALLEL_API_KEY in .env file.",
@@ -234,23 +273,33 @@ Approve this research task?
 
     try:
         # Execute research
-        logger.info(f"Creating research run with processor '{processor}'")
+        SystemLogger.info(f"Creating research run with processor '{processor}'", {
+            "query_length": len(query),
+            "processor": processor
+        })
         await ctx.report_progress(0.1, 1.0, "Initiating research...")
 
         run = parallel_client.task_run.create(input=query, processor=processor)
-        logger.info(f"Research run created: run_id={run.run_id}")
+        SystemLogger.info("Research run created", {
+            "run_id": run.run_id,
+            "processor": processor,
+            "query_preview": query[:30]
+        })
 
         # Poll for completion
         poll_count = 0
         while True:
             status = parallel_client.task_run.retrieve(run.run_id)
             if not status.is_active:
-                logger.info(
-                    f"Research completed after {poll_count} polls: status={status.status}"
-                )
+                SystemLogger.info("Research completed", {
+                    "poll_count": poll_count,
+                    "status": status.status,
+                    "run_id": run.run_id
+                })
                 break
 
             poll_count += 1
+            log_progress(0.5, 1.0, f"Researching... ({status.status})")
             await ctx.report_progress(0.5, 1.0, f"Researching... ({status.status})")
             await asyncio.sleep(10)
 
@@ -299,21 +348,30 @@ Approve this research task?
             else:
                 content = str(output_content)
 
-        logger.info(
-            f"Research successful: {len(citations)} citation groups, content length={len(content)}"
-        )
+        SystemLogger.info("Research successful", {
+            "citation_groups": len(citations),
+            "content_length": len(content),
+            "run_id": run.run_id,
+            "processor": processor
+        })
         await ctx.report_progress(1.0, 1.0, "Research complete")
 
-        return {
+        result_data = {
             "status": "complete",
             "content": content,
             "citations": citations,
             "processor": processor,
             "run_id": run.run_id,
         }
+        log_exit("research_architecture_decision", {"status": "complete", "run_id": run.run_id})
+        return result_data
 
     except Exception as e:
-        logger.error(f"Research failed: {e}", exc_info=True)
+        SystemLogger.error("Research failed", exception=e, context={
+            "query": query[:50],
+            "processor": processor
+        })
+        log_exit("research_architecture_decision", {"status": "error"})
         return {"status": "error", "message": f"Research failed: {str(e)}"}
 
 
@@ -344,10 +402,16 @@ async def quick_research(query: str, ctx: Context) -> Dict[str, Any]:
     --------
     >>> result = await quick_research("What is OAuth 2.1?", ctx)
     """
-    logger.info(f"Quick research request: query='{query}'")
+    log_entry("quick_research", {"query": query[:50] if query else ""})
+
+    SystemLogger.info("Quick research request", {
+        "query_length": len(query),
+        "query_preview": query[:50] + "..." if len(query) > 50 else query
+    })
 
     if parallel_client is None:
-        logger.error("Parallel AI client not configured")
+        SystemLogger.error("Parallel AI client not configured for quick research")
+        log_exit("quick_research", {"status": "error"})
         return {
             "status": "error",
             "message": "Parallel AI client not configured.",
@@ -357,7 +421,10 @@ async def quick_research(query: str, ctx: Context) -> Dict[str, Any]:
         await ctx.report_progress(0.3, 1.0, "Quick research in progress...")
 
         run = parallel_client.task_run.create(input=query, processor="lite")
-        logger.info(f"Quick research run created: run_id={run.run_id}")
+        SystemLogger.debug("Quick research run created", {
+            "run_id": run.run_id,
+            "processor": "lite"
+        })
 
         # Poll for completion
         while True:
@@ -377,24 +444,40 @@ async def quick_research(query: str, ctx: Context) -> Dict[str, Any]:
             else:
                 content = str(output_content)
 
-        logger.info(f"Quick research successful: content length={len(content)}")
+        SystemLogger.info("Quick research successful", {
+            "content_length": len(content),
+            "run_id": run.run_id
+        })
         await ctx.report_progress(1.0, 1.0, "Complete")
 
-        return {
+        result_data = {
             "status": "complete",
             "content": content,
             "processor": "lite",
             "run_id": run.run_id,
         }
+        log_exit("quick_research", {"status": "complete", "run_id": run.run_id})
+        return result_data
 
     except Exception as e:
-        logger.error(f"Quick research failed: {e}", exc_info=True)
+        SystemLogger.error("Quick research failed", exception=e, context={
+            "query": query[:50] if query else ""
+        })
+        log_exit("quick_research", {"status": "error"})
         return {"status": "error", "message": str(e)}
 
 
 if __name__ == "__main__":
+    SystemLogger.info("Starting Parallel AI MCP Server", {
+        "timeout": 360,
+        "default_processor": os.getenv('DEFAULT_PROCESSOR', 'pro'),
+        "api_key_configured": bool(os.getenv("PARALLEL_API_KEY"))
+    })
+
     print("Starting Parallel AI MCP Server...")
     print(f"Timeout: 360 seconds")
     print(f"Default Processor: {os.getenv('DEFAULT_PROCESSOR', 'pro')}")
+    print(f"Logs directory: logs/")
+    print(f"Log files: system.log (all), errors.log (errors only)")
 
     mcp.run()
