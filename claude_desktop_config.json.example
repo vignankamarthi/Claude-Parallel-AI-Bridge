@@ -1,13 +1,15 @@
 {
   "mcpServers": {
     "parallel-research": {
-      "command": "python",
+      "command": "/ABSOLUTE/PATH/TO/PROJECT/venv/bin/python",
       "args": [
-        "<PATH_TO_PROJECT>/server.py"
+        "/ABSOLUTE/PATH/TO/PROJECT/server.py"
       ],
       "env": {
-        "PARALLEL_API_KEY": "${PARALLEL_API_KEY}"
+        "PARALLEL_API_KEY": "your_parallel_api_key_here"
       }
     }
   }
 }
+
+

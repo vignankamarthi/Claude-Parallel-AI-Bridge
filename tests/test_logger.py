@@ -94,16 +94,16 @@ def main():
     SystemLogger.info("Starting logger tests", {"test_suite": "SystemLogger"})
 
     test_basic_logging()
-    print("✅ Basic logging test completed")
+    print(" Basic logging test completed")
 
     test_progress_logging()
-    print("✅ Progress logging test completed")
+    print(" Progress logging test completed")
 
     test_complex_context()
-    print("✅ Complex context test completed")
+    print(" Complex context test completed")
 
     test_log_files()
-    print("✅ Log files test completed")
+    print(" Log files test completed")
 
     SystemLogger.info("All logger tests completed successfully")
 
@@ -116,7 +116,7 @@ def main():
         for file in os.listdir("logs"):
             filepath = os.path.join("logs", file)
             size = os.path.getsize(filepath)
-            print(f"  📁 {file:<20} ({size:,} bytes)")
+            print(f"  File {file:<20} ({size:,} bytes)")
 
     print("\nTo view logs, run:")
     print("  tail -f logs/system.log    # All logs")

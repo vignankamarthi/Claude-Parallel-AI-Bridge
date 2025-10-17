@@ -58,21 +58,44 @@ DEFAULT_PROCESSOR=pro
 
 5. Configure Claude Desktop:
 
-Copy `claude_desktop_config.json.example` to your Claude Desktop config location:
+Edit your Claude Desktop config file:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Update the path in the config:
+**IMPORTANT**: Use absolute paths and paste your actual API key:
+
 ```json
 {
   "mcpServers": {
     "parallel-research": {
-      "command": "python",
+      "command": "/ABSOLUTE/PATH/TO/PROJECT/venv/bin/python",
       "args": [
-        "/full/path/to/your/project/server.py"
+        "/ABSOLUTE/PATH/TO/PROJECT/server.py"
       ],
       "env": {
-        "PARALLEL_API_KEY": "${PARALLEL_API_KEY}"
+        "PARALLEL_API_KEY": "your_actual_api_key_here"
+      }
+    }
+  }
+}
+```
+
+Replace:
+- `/ABSOLUTE/PATH/TO/PROJECT/` with the full path to this project directory
+- `your_actual_api_key_here` with your Parallel AI API key
+- On Windows, use forward slashes or escaped backslashes in paths
+
+**Example** (macOS):
+```json
+{
+  "mcpServers": {
+    "parallel-research": {
+      "command": "/Users/yourname/projects/Claude-Parallel-AI-Integration/venv/bin/python",
+      "args": [
+        "/Users/yourname/projects/Claude-Parallel-AI-Integration/server.py"
+      ],
+      "env": {
+        "PARALLEL_API_KEY": "PU5s2oTfloD9RVUFsaF-chyHg4i8pFNobnAU78Fd"
       }
     }
   }
@@ -80,6 +103,8 @@ Update the path in the config:
 ```
 
 6. Restart Claude Desktop
+
+**Fully quit** Claude Desktop (not just close the window) and restart it to load the MCP server.
 
 ## Usage
 
