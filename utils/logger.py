@@ -33,8 +33,18 @@ class SystemLogger:
             return
 
         # Create logs directory if it doesn't exist
-        log_dir = "logs"
-        os.makedirs(log_dir, exist_ok=True)
+        # Use absolute path based on this file's location to support MCP server usage
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        log_dir = os.path.join(script_dir, "logs")
+
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError:
+            # If we can't create logs directory (e.g., read-only filesystem),
+            # use temp directory as fallback
+            import tempfile
+            log_dir = os.path.join(tempfile.gettempdir(), "parallel-mcp-logs")
+            os.makedirs(log_dir, exist_ok=True)
 
         # Clean up old log files first
         cls._cleanup_old_logs(log_dir)
