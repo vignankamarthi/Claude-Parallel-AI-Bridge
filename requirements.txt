@@ -14,3 +14,7 @@ pydantic>=2.0.0
 
 # HTTP client
 requests
+
+# Async/WebSocket support (for future WebSocket transport)
+starlette>=0.27.0
+uvicorn>=0.23.0
