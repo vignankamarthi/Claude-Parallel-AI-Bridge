@@ -1,12 +1,12 @@
 # Parallel AI MCP Server
 
-A Model Context Protocol (MCP) server that integrates Parallel AI's deep research API with Claude Desktop for comprehensive technical research with structured citations.
+A Model Context Protocol (MCP) server that integrates Parallel AI's deep research API with Claude's Tool Ecosystem for comprehensive technical research with structured citations.
 
 **Author**: Vignan Kamarthi
 
 ## Overview
 
-This MCP server provides Claude Desktop with access to Parallel AI's enterprise research API, enabling deep technical research with citation-backed answers across software engineering, ML/AI, data engineering, and research domains. The integration supports async/parallel task execution, multiple processor tiers (from quick fact retrieval to extensive SOTA research), and user approval workflows for cost management.
+This MCP server provides Claude Desktop and Claude Code with access to Parallel AI's enterprise research API, enabling deep technical research with citation-backed answers across software engineering, ML/AI, data engineering, and research domains. The integration supports async/parallel task execution, multiple processor tiers (from quick fact retrieval to extensive SOTA research), intelligent chunking for large outputs, and user approval workflows for cost management.
 
 ## Features
 
@@ -15,16 +15,18 @@ This MCP server provides Claude Desktop with access to Parallel AI's enterprise 
 - **Structured Citations**: Field-level citations with URLs, excerpts, confidence scores, and reasoning
 - **Multiple Processor Tiers**: 9 tiers from Lite ($5/1K) to Ultra8x ($2,400/1K)
 - **Approval Workflow**: User consent required before expensive API calls with cost/time estimates
-- **Task Status Tracking**: Check progress and results of async research tasks
+- **Task Status Tracking**: Real-time elapsed time vs expected duration
+- **Smart Chunking**: Large research outputs (65-70k tokens) automatically split into ~15k token chunks
 - **Quick Research**: Fast Lite processor mode for basic queries without approval (no blocking)
 - **Comprehensive Logging**: Production-ready logging with timestamped console output
+- **Rich Metadata**: Detailed task info optimized for agentic environments (Claude Code, Cursor, etc.)
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.8+
-- Claude Desktop
+- Claude Desktop or Claude Code
 - Parallel AI API key (get one at [parallel.ai](https://www.parallel.ai))
 
 ### Setup
@@ -62,14 +64,43 @@ PARALLEL_API_KEY=your_api_key_here
 DEFAULT_PROCESSOR=pro
 ```
 
-5. Configure Claude Desktop:
+5. Configure MCP Client:
+
+**For Claude Code (Recommended):**
+
+Use the Claude Code CLI to add the MCP server:
+
+```bash
+# Add the server with environment variables
+claude mcp add --transport stdio parallel-research \
+  --env PARALLEL_API_KEY=your_actual_api_key_here \
+  --env DEFAULT_PROCESSOR=pro \
+  -- /ABSOLUTE/PATH/TO/PROJECT/venv/bin/python /ABSOLUTE/PATH/TO/PROJECT/server.py
+```
+
+Replace:
+
+- `your_actual_api_key_here` with your Parallel AI API key
+- `/ABSOLUTE/PATH/TO/PROJECT/` with the full path to this project directory
+
+**Scope options:**
+
+- Default (local): Private to current project
+- `--scope project`: Shared via .mcp.json (commit to git)
+- `--scope user`: Available across all projects
+
+Verify installation:
+
+```bash
+claude mcp list
+```
+
+**For Claude Desktop:**
 
 Edit your Claude Desktop config file:
 
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-**IMPORTANT**: Use absolute paths and paste your actual API key:
 
 ```json
 {
@@ -92,9 +123,11 @@ Replace:
 - `your_actual_api_key_here` with your Parallel AI API key
 - On Windows, use forward slashes or escaped backslashes in paths
 
-6. Restart Claude Desktop
+6. Activate:
 
-**Fully quit** Claude Desktop (not just close the window) and restart it to load the MCP server.
+**Claude Code**: Server activates automatically
+
+**Claude Desktop**: Fully quit (Cmd+Q / File→Exit) and restart
 
 ## Usage
 
@@ -118,12 +151,14 @@ Use the deep_research tool to research:
 
 ### Quick Research (Sync)
 
-For fast, low-cost queries (no approval required, returns immediately):
+For fast, low-cost queries (no approval required, completes in 5-60s):
 
 ```
 Use the quick_research tool to answer:
 "What is OAuth 2.1?"
 ```
+
+Returns immediately with basic metadata and answer. Synchronous - blocks until complete (5-60s).
 
 ### Task Status
 
@@ -134,7 +169,21 @@ Use the task_status tool with task_id:
 "<task_id_from_deep_research>"
 ```
 
-Returns progress updates or final results when complete.
+Returns elapsed time vs expected duration for running tasks, or full results with metadata when complete.
+
+**For large outputs (>15k tokens)**: First chunk returned automatically. Use `get_research_chunk` to retrieve remaining chunks.
+
+### Retrieve Research Chunks
+
+For large research outputs that exceed token limits:
+
+```
+Use the get_research_chunk tool:
+task_id: "<task_id>"
+chunk: 2
+```
+
+Retrieves specific chunk from multi-part research results. Ultra-tier processors can generate 65-70k tokens, automatically split into ~15k token chunks for safe retrieval.
 
 ### Session Start
 
@@ -195,39 +244,99 @@ Check status and results of async research task.
 
 **Returns**:
 
-```python
-# If complete:
-{
-    "status": "complete",
-    "content": str,  # Synthesized research answer
-    "citations": [   # Structured citations
-        {
-            "field": str,
-            "citations": [
-                {
-                    "url": str,
-                    "excerpts": [str],
-                    "title": str
-                }
-            ],
-            "confidence": float,
-            "reasoning": str
-        }
-    ],
-    "processor": str,
-    "run_id": str
-}
-
-# If running:
-{
-    "status": "running",
-    "progress": float  # 0.0 to 1.0
-}
 ```
+# If running:
+RESEARCH IN PROGRESS
+
+Task ID: abc-123
+Query: Your research question
+Processor: ultra8x
+Status: running
+Expected Duration: 8-30min
+Elapsed Time: 12.3 minutes
+Created: 2025-11-04 14:23:15
+Run ID: run_xyz
+
+Still researching... Check back in 30s.
+
+# If complete (small output):
+RESEARCH COMPLETE
+
+=== METADATA ===
+Task ID: abc-123
+Query: Your research question
+Processor: ultra8x
+Expected Duration: 8-30min
+Actual Duration: 18.5 minutes
+Created: 2025-11-04 14:23:15
+Completed: 2025-11-04 14:41:45
+Run ID: run_xyz
+Content Length: 45,230 chars (~11,307 tokens)
+Citation Groups: 8
+
+=== RESEARCH FINDINGS ===
+[Full content...]
+
+=== CITATIONS ===
+[Structured citations...]
+
+# If complete (large output - chunked):
+RESEARCH COMPLETE (CHUNKED OUTPUT)
+
+=== METADATA ===
+Task ID: abc-123
+Query: Your research question
+Processor: ultra8x
+Expected Duration: 8-30min
+Actual Duration: 25.2 minutes
+Content Length: 280,000 chars (~70,000 tokens)
+Total Chunks: 5
+Citation Groups: 12
+
+WARNING: This research output is LARGE (70,000 tokens).
+It has been split into 5 chunks for safe retrieval.
+
+=== RESEARCH FINDINGS (CHUNK 1/5) ===
+[First chunk content...]
+
+[... 4 more chunk(s) available ...]
+
+To retrieve additional chunks, use the get_research_chunk tool.
+Example: get_research_chunk(task_id="abc-123", chunk=2)
+
+=== CITATIONS ===
+[Structured citations...]
+```
+
+#### `get_research_chunk`
+
+Retrieve specific chunk from large research output. Use when task_status indicates chunked output.
+
+**Parameters**:
+
+- `task_id` (str): Task ID from deep_research
+- `chunk` (int): Chunk number to retrieve (1-indexed)
+
+**Returns**:
+
+```
+RESEARCH CHUNK 2/5
+
+Task ID: abc-123
+Query: Your research question
+Chunk: 2 of 5
+
+=== CONTENT ===
+[Chunk 2 content (~15k tokens)...]
+
+[End of chunk 2/5]
+```
+
+**When to use**: Ultra-tier processors (especially ultra8x) can generate 65-70k tokens. These are automatically split into ~15k token chunks. The first chunk is returned with task_status, use this tool to retrieve chunks 2-N.
 
 #### `quick_research`
 
-Quick research using Lite processor (5-60s, $5/1K queries). No approval required. Synchronous.
+Quick research using Lite processor (5-60s, $5/1K queries). No approval required. Synchronous (blocks until complete).
 
 **Parameters**:
 
@@ -235,14 +344,22 @@ Quick research using Lite processor (5-60s, $5/1K queries). No approval required
 
 **Returns**:
 
-```python
-{
-    "status": "complete" | "error",
-    "content": str,
-    "processor": "lite",
-    "run_id": str
-}
 ```
+QUICK RESEARCH COMPLETE
+
+=== METADATA ===
+Query: What is OAuth 2.1?
+Processor: lite
+Duration: 12.3 seconds
+Expected: 5-60s
+Run ID: run_xyz
+Content Length: 1,234 chars
+
+=== ANSWER ===
+[Research answer here...]
+```
+
+**Note**: Quick research completes synchronously (5-60s). For longer research (3-30min), use `deep_research` which runs async in background.
 
 ### Prompts
 
@@ -271,3 +388,96 @@ Submit Task C → task_id_C (research runs for 3-9 min)
 All three run simultaneously in background.
 Check status of any task at any time.
 ```
+
+## Updating the MCP Server
+
+After pulling updates from GitHub, follow these steps to get the latest version working:
+
+### Quick Update (Code Changes Only)
+
+If only Python code changed (server.py, utils/, etc.):
+
+**For Claude Code:**
+
+```bash
+cd /path/to/Claude-Parallel-AI-Bridge
+git pull
+```
+
+Then restart VS Code - changes apply automatically on startup.
+
+**For Claude Desktop:**
+
+```bash
+cd /path/to/Claude-Parallel-AI-Bridge
+git pull
+```
+
+Then restart Claude Desktop (Cmd+Q / File → Exit, then reopen) - changes apply automatically.
+
+### Full Update (Dependencies Changed)
+
+If requirements.txt was updated:
+
+**For Claude Code:**
+
+```bash
+cd /path/to/Claude-Parallel-AI-Bridge
+git pull
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt --upgrade
+```
+
+Then restart VS Code
+
+**For Claude Desktop:**
+
+```bash
+cd /path/to/Claude-Parallel-AI-Bridge
+git pull
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt --upgrade
+```
+
+Then fully quit and restart Claude Desktop
+
+### Verifying the Update
+
+Verify installation:
+
+1. Try using `get_research_chunk` tool
+2. Check that `task_status` shows elapsed time
+3. Look for chunking warnings on large research outputs
+4. Check the logs at `logs/parallel_mcp_*.log` for startup messages
+
+### Common Issues
+
+**"Tool not found: get_research_chunk"**
+
+- **Claude Code**: Restart VS Code
+- **Claude Desktop**: Restart Claude Desktop (Cmd+Q / File → Exit, then reopen)
+
+**Dependencies missing**
+
+- Rerun: `pip install -r requirements.txt`
+- Check you're in the right venv: `which python`
+
+**MCP not connecting (Claude Code)**
+
+- Check server status: `claude mcp get parallel-research`
+- View logs: `logs/parallel_mcp_*.log`
+- Test manually: `python server.py`
+- Remove and re-add if needed:
+  ```bash
+  claude mcp remove parallel-research
+  claude mcp add --transport stdio parallel-research \
+    --env PARALLEL_API_KEY=your_key \
+    --env DEFAULT_PROCESSOR=pro \
+    -- /path/to/venv/bin/python /path/to/server.py
+  ```
+
+**MCP not connecting (Claude Desktop)**
+
+- Check logs: `logs/parallel_mcp_*.log` for errors
+- Verify paths in config are absolute (no `~` or `$HOME`)
+- Test server manually: `python server.py`

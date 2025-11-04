@@ -64,14 +64,14 @@ class TaskState:
         Processor tier (lite/base/core/pro/ultra/etc)
     status : TaskStatus
         Current task status
-    progress : float
-        Progress 0.0-1.0
     result : Optional[Dict]
         Research result when complete
     error : Optional[str]
         Error message if failed
     created_at : datetime
         Task creation timestamp
+    started_at : Optional[datetime]
+        Timestamp when task execution started
     run_id : Optional[str]
         Parallel AI run ID
     """
@@ -79,10 +79,10 @@ class TaskState:
     query: str
     processor: str
     status: TaskStatus = TaskStatus.PENDING
-    progress: float = 0.0
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
+    started_at: Optional[datetime] = None
     run_id: Optional[str] = None
 
 
@@ -155,6 +155,24 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["task_id"]
             }
+        ),
+        Tool(
+            name="get_research_chunk",
+            description="Retrieve specific chunk from large research output. Use when research result was split into multiple chunks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID returned from deep_research"
+                    },
+                    "chunk": {
+                        "type": "integer",
+                        "description": "Chunk number to retrieve (1-indexed)"
+                    }
+                },
+                "required": ["task_id", "chunk"]
+            }
         )
     ]
 
@@ -212,14 +230,18 @@ async def poll_parallel_task(task_state: TaskState) -> None:
 
     try:
         task_state.status = TaskStatus.RUNNING
+        task_state.started_at = datetime.now()
+        start_time = task_state.started_at
         poll_count = 0
 
         while True:
             status = parallel_client.task_run.retrieve(task_state.run_id)
 
             if not status.is_active:
+                elapsed = (datetime.now() - start_time).total_seconds()
                 SystemLogger.info("Research completed", {
                     "poll_count": poll_count,
+                    "elapsed_seconds": elapsed,
                     "status": status.status,
                     "run_id": task_state.run_id,
                     "task_id": task_state.task_id
@@ -227,8 +249,12 @@ async def poll_parallel_task(task_state: TaskState) -> None:
                 break
 
             poll_count += 1
-            task_state.progress = 0.5 + (poll_count * 0.01)  # Incremental progress
-            log_progress(task_state.progress, 1.0, f"Researching... ({status.status})")
+            elapsed = (datetime.now() - start_time).total_seconds()
+            elapsed_mins = elapsed / 60
+            SystemLogger.info(f"Research polling - {elapsed_mins:.1f}min elapsed", {
+                "poll_count": poll_count,
+                "api_status": status.status if hasattr(status, 'status') else 'unknown'
+            })
             await asyncio.sleep(10)
 
         # Retrieve results
@@ -276,19 +302,41 @@ async def poll_parallel_task(task_state: TaskState) -> None:
             else:
                 content = str(output_content)
 
+        # Estimate token count (rough: chars / 4)
+        estimated_tokens = len(content) / 4
+
+        # Split into chunks if too large (>15k tokens per chunk for safety)
+        chunk_size = 15000 * 4  # ~60k chars per chunk
+        chunks = []
+        if estimated_tokens > 15000:
+            # Split content into chunks
+            for i in range(0, len(content), chunk_size):
+                chunks.append(content[i:i+chunk_size])
+            SystemLogger.info("Large result chunked", {
+                "total_tokens": int(estimated_tokens),
+                "num_chunks": len(chunks),
+                "task_id": task_state.task_id
+            })
+        else:
+            chunks = [content]
+
         task_state.result = {
             "status": "complete",
             "content": content,
+            "chunks": chunks,
+            "total_chunks": len(chunks),
+            "estimated_tokens": int(estimated_tokens),
             "citations": citations,
             "processor": task_state.processor,
             "run_id": task_state.run_id,
         }
         task_state.status = TaskStatus.COMPLETE
-        task_state.progress = 1.0
 
         SystemLogger.info("Research successful", {
             "citation_groups": len(citations),
             "content_length": len(content),
+            "estimated_tokens": int(estimated_tokens),
+            "total_chunks": len(chunks),
             "run_id": task_state.run_id,
             "task_id": task_state.task_id
         })
@@ -335,6 +383,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "task_status":
         return await task_status(arguments.get("task_id"))
 
+    elif name == "get_research_chunk":
+        return await get_research_chunk(
+            arguments.get("task_id"),
+            arguments.get("chunk")
+        )
+
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -369,6 +423,7 @@ async def quick_research(query: str) -> list[TextContent]:
         )]
 
     try:
+        start_time = datetime.now()
         run = parallel_client.task_run.create(input=query, processor="lite")
         SystemLogger.debug("Quick research run created", {
             "run_id": run.run_id,
@@ -393,13 +448,33 @@ async def quick_research(query: str) -> list[TextContent]:
             else:
                 content = str(output_content)
 
+        # Calculate elapsed time
+        elapsed_seconds = (datetime.now() - start_time).total_seconds()
+        elapsed_str = f"{elapsed_seconds:.1f} seconds"
+
         SystemLogger.info("Quick research successful", {
             "content_length": len(content),
+            "elapsed_seconds": elapsed_seconds,
             "run_id": run.run_id
         })
 
+        # Format response with metadata
+        response = f"""QUICK RESEARCH COMPLETE
+
+=== METADATA ===
+Query: {query}
+Processor: lite
+Duration: {elapsed_str}
+Expected: 5-60s
+Run ID: {run.run_id}
+Content Length: {len(content)} chars
+
+=== ANSWER ===
+{content}
+"""
+
         log_exit("quick_research", {"status": "complete", "run_id": run.run_id})
-        return [TextContent(type="text", text=content)]
+        return [TextContent(type="text", text=response)]
 
     except Exception as e:
         SystemLogger.error("Quick research failed", exception=e, context={
@@ -545,6 +620,62 @@ Approve? This will run in background."""
         return [TextContent(type="text", text=f"ERROR: {str(e)}")]
 
 
+async def get_research_chunk(task_id: str, chunk: int) -> list[TextContent]:
+    """
+    Retrieve specific chunk from large research output.
+
+    Parameters
+    ----------
+    task_id : str
+        Task ID
+    chunk : int
+        Chunk number (1-indexed)
+
+    Returns
+    -------
+    list[TextContent]
+        Requested chunk
+    """
+    log_entry("get_research_chunk", {"task_id": task_id, "chunk": chunk})
+
+    if task_id not in task_queue:
+        return [TextContent(type="text", text=f"ERROR: Task {task_id} not found")]
+
+    task = task_queue[task_id]
+
+    if task.status != TaskStatus.COMPLETE:
+        return [TextContent(
+            type="text",
+            text=f"ERROR: Task {task_id} is not complete yet (status: {task.status})"
+        )]
+
+    result = task.result
+    total_chunks = result.get('total_chunks', 1)
+    chunks = result.get('chunks', [])
+
+    if chunk < 1 or chunk > total_chunks:
+        return [TextContent(
+            type="text",
+            text=f"ERROR: Invalid chunk number {chunk}. Valid range: 1-{total_chunks}"
+        )]
+
+    # Return requested chunk
+    chunk_index = chunk - 1
+    response = f"""RESEARCH CHUNK {chunk}/{total_chunks}
+
+Task ID: {task_id}
+Query: {task.query}
+Chunk: {chunk} of {total_chunks}
+
+=== CONTENT ===
+{chunks[chunk_index]}
+
+[End of chunk {chunk}/{total_chunks}]
+"""
+    log_exit("get_research_chunk", {"task_id": task_id, "chunk": chunk})
+    return [TextContent(type="text", text=response)]
+
+
 async def task_status(task_id: str) -> list[TextContent]:
     """
     Check status of async research task.
@@ -566,42 +697,126 @@ async def task_status(task_id: str) -> list[TextContent]:
 
     task = task_queue[task_id]
 
-    if task.status == TaskStatus.COMPLETE:
-        # Return full result
-        result = task.result
-        response = f"""RESEARCH COMPLETE
+    # Expected duration map
+    time_map = {
+        "lite": "5-60s", "base": "15-100s", "core": "1-5min", "core2x": "1-5min",
+        "pro": "3-9min", "ultra": "5-25min", "ultra2x": "5-25min",
+        "ultra4x": "8-30min", "ultra8x": "8-30min",
+    }
 
+    if task.status == TaskStatus.COMPLETE:
+        # Calculate elapsed time
+        elapsed_seconds = (datetime.now() - task.created_at).total_seconds()
+        elapsed_str = f"{elapsed_seconds/60:.1f} minutes" if elapsed_seconds >= 60 else f"{elapsed_seconds:.0f} seconds"
+
+        # Return result with metadata
+        result = task.result
+        total_chunks = result.get('total_chunks', 1)
+        estimated_tokens = result.get('estimated_tokens', 0)
+
+        # Build citations section
+        citations_text = "\n=== CITATIONS ===\n"
+        for idx, citation_group in enumerate(result['citations'], 1):
+            citations_text += f"\n[{idx}] {citation_group['field']}\n"
+            citations_text += f"    Confidence: {citation_group['confidence']}\n"
+            citations_text += f"    Reasoning: {citation_group['reasoning']}\n"
+            for cite in citation_group['citations']:
+                citations_text += f"    - {cite['title']}: {cite['url']}\n"
+
+        if total_chunks > 1:
+            # Large result - return chunked
+            response = f"""RESEARCH COMPLETE (CHUNKED OUTPUT)
+
+=== METADATA ===
+Task ID: {task_id}
 Query: {task.query}
 Processor: {task.processor}
+Expected Duration: {time_map.get(task.processor, 'unknown')}
+Actual Duration: {elapsed_str}
+Created: {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}
+Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Run ID: {task.run_id}
+Content Length: {len(result['content'])} chars (~{estimated_tokens:,} tokens)
+Total Chunks: {total_chunks}
+Citation Groups: {len(result['citations'])}
 
+WARNING: This research output is LARGE ({estimated_tokens:,} tokens).
+It has been split into {total_chunks} chunks for safe retrieval.
+
+=== RESEARCH FINDINGS (CHUNK 1/{total_chunks}) ===
+{result['chunks'][0]}
+
+[... {total_chunks - 1} more chunk(s) available ...]
+
+To retrieve additional chunks, use the get_research_chunk tool.
+Example: get_research_chunk(task_id="{task_id}", chunk=2)
+
+{citations_text}
+"""
+        else:
+            # Small result - return complete
+            response = f"""RESEARCH COMPLETE
+
+=== METADATA ===
+Task ID: {task_id}
+Query: {task.query}
+Processor: {task.processor}
+Expected Duration: {time_map.get(task.processor, 'unknown')}
+Actual Duration: {elapsed_str}
+Created: {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}
+Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Run ID: {task.run_id}
+Content Length: {len(result['content'])} chars (~{estimated_tokens:,} tokens)
+Citation Groups: {len(result['citations'])}
+
+=== RESEARCH FINDINGS ===
 {result['content']}
 
---- CITATIONS ---
+{citations_text}
 """
-        for idx, citation_group in enumerate(result['citations'], 1):
-            response += f"\n[{idx}] {citation_group['field']}\n"
-            response += f"    Confidence: {citation_group['confidence']}\n"
-            response += f"    Reasoning: {citation_group['reasoning']}\n"
-            for cite in citation_group['citations']:
-                response += f"    - {cite['title']}: {cite['url']}\n"
-
-        log_exit("task_status", {"status": "complete", "task_id": task_id})
+        log_exit("task_status", {"status": "complete", "task_id": task_id, "chunked": total_chunks > 1})
         return [TextContent(type="text", text=response)]
 
     elif task.status == TaskStatus.FAILED:
+        elapsed_seconds = (datetime.now() - task.created_at).total_seconds()
+        elapsed_str = f"{elapsed_seconds/60:.1f} minutes" if elapsed_seconds >= 60 else f"{elapsed_seconds:.0f} seconds"
+
         log_exit("task_status", {"status": "failed", "task_id": task_id})
         return [TextContent(
             type="text",
-            text=f"RESEARCH FAILED\n\nTask ID: {task_id}\nError: {task.error}"
+            text=f"""RESEARCH FAILED
+
+Task ID: {task_id}
+Query: {task.query}
+Processor: {task.processor}
+Expected Duration: {time_map.get(task.processor, 'unknown')}
+Failed After: {elapsed_str}
+Error: {task.error}"""
         )]
 
     else:
-        # Still running
+        # Still running - show elapsed time vs expected
+        if task.started_at:
+            elapsed_seconds = (datetime.now() - task.started_at).total_seconds()
+            elapsed_str = f"{elapsed_seconds/60:.1f} minutes" if elapsed_seconds >= 60 else f"{elapsed_seconds:.0f} seconds"
+        else:
+            elapsed_str = "Not started yet"
+
         log_exit("task_status", {"status": task.status, "task_id": task_id})
         return [TextContent(
             type="text",
-            text=f"Status: {task.status}\nProgress: {task.progress:.1%}\n\nStill researching... Check back in 30s."
+            text=f"""RESEARCH IN PROGRESS
+
+Task ID: {task_id}
+Query: {task.query}
+Processor: {task.processor}
+Status: {task.status}
+Expected Duration: {time_map.get(task.processor, 'unknown')}
+Elapsed Time: {elapsed_str}
+Created: {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}
+Run ID: {task.run_id}
+
+Still researching... Check back in 30s."""
         )]
 
 
