@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Parallel AI MCP Server (WebSocket)
+Parallel AI MCP Server
 
-A Model Context Protocol server with WebSocket transport for async/parallel
+A Model Context Protocol server with stdio transport for async/parallel
 research task execution using Parallel AI's deep research API.
 
 Author: Vignan Kamarthi
+
+Migrated to MCPServer API (mcp SDK v1.25+) on 2026-04-06.
 """
 
 import os
@@ -16,7 +18,6 @@ from enum import Enum
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 
 # Load environment variables
 load_dotenv()
@@ -26,9 +27,8 @@ from utils.logger import SystemLogger, log_entry, log_exit, log_progress
 
 # MCP imports
 try:
-    from mcp.server import Server
-    from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
-    import mcp.server.stdio
+    from mcp.server.mcpserver.server import MCPServer
+    from mcp.types import TextContent
 except ImportError:
     SystemLogger.error("MCP not installed", context={"module": "mcp.server"})
     print("ERROR: MCP not installed. Run: pip install mcp")
@@ -86,135 +86,22 @@ class TaskState:
     run_id: Optional[str] = None
 
 
-class ApprovalSchema(BaseModel):
-    """User approval schema for research operations."""
-    approved: bool = Field(description="User approves research task")
-    max_wait_minutes: int = Field(
-        default=15, description="Maximum wait time in minutes"
-    )
+# Cost and time estimate maps (shared across tools)
+COST_MAP = {
+    "lite": "$5", "base": "$10", "core": "$30", "core2x": "$60",
+    "pro": "$100", "ultra": "$300", "ultra2x": "$600",
+    "ultra4x": "$1,200", "ultra8x": "$2,400",
+}
+TIME_MAP = {
+    "lite": "5-60s", "base": "15-100s", "core": "1-5min", "core2x": "1-5min",
+    "pro": "3-9min", "ultra": "5-25min", "ultra2x": "5-25min",
+    "ultra4x": "8-30min", "ultra8x": "8-30min",
+}
+VALID_PROCESSORS = list(COST_MAP.keys())
 
 
 # Initialize MCP server
-server = Server("parallel-research-websocket")
-
-
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    """
-    List available research tools.
-
-    Returns
-    -------
-    list[Tool]
-        Available MCP tools
-    """
-    return [
-        Tool(
-            name="quick_research",
-            description="Fast research using lite processor (5-60s, $5/1K). No approval required. Use for definitions, fact-checking, quick lookups.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Research question"
-                    }
-                },
-                "required": ["query"]
-            }
-        ),
-        Tool(
-            name="deep_research",
-            description="Comprehensive research with structured citations. Approval required. Runs asynchronously (non-blocking). Use for complex technical decisions, comparisons, production pattern validation.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Research question (e.g., 'Compare authentication approaches for microservices', 'Compare focal loss vs weighted CE for imbalanced datasets')"
-                    },
-                    "processor": {
-                        "type": "string",
-                        "description": "Processor tier: lite, base, core, core2x, pro (default), ultra, ultra2x, ultra4x, ultra8x",
-                        "default": os.getenv("DEFAULT_PROCESSOR", "pro")
-                    }
-                },
-                "required": ["query"]
-            }
-        ),
-        Tool(
-            name="task_status",
-            description="Check status of async research task",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "Task ID returned from deep_research"
-                    }
-                },
-                "required": ["task_id"]
-            }
-        ),
-        Tool(
-            name="get_research_chunk",
-            description="Retrieve specific chunk from large research output. Use when research result was split into multiple chunks.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "Task ID returned from deep_research"
-                    },
-                    "chunk": {
-                        "type": "integer",
-                        "description": "Chunk number to retrieve (1-indexed)"
-                    }
-                },
-                "required": ["task_id", "chunk"]
-            }
-        )
-    ]
-
-
-@server.list_prompts()
-async def list_prompts() -> list:
-    """List available prompts."""
-    return [
-        {
-            "name": "research_session_start",
-            "description": "Start research session",
-            "arguments": []
-        }
-    ]
-
-
-@server.get_prompt()
-async def get_prompt(name: str, arguments: dict) -> str:
-    """
-    Get prompt content.
-
-    Parameters
-    ----------
-    name : str
-        Prompt name
-    arguments : dict
-        Prompt arguments
-
-    Returns
-    -------
-    str
-        Prompt content
-    """
-    if name == "research_session_start":
-        return """Research tools available:
-
-- quick_research: Fast lookups (5-60s, no approval)
-- deep_research: Comprehensive research with citations (async, approval required)
-
-Deep research runs in background. Submit query, continue working, check results later."""
-
-    return f"Unknown prompt: {name}"
+server = MCPServer("parallel-research")
 
 
 async def poll_parallel_task(task_state: TaskState) -> None:
@@ -309,7 +196,6 @@ async def poll_parallel_task(task_state: TaskState) -> None:
         chunk_size = 15000 * 4  # ~60k chars per chunk
         chunks = []
         if estimated_tokens > 15000:
-            # Split content into chunks
             for i in range(0, len(content), chunk_size):
                 chunks.append(content[i:i+chunk_size])
             SystemLogger.info("Large result chunked", {
@@ -352,61 +238,16 @@ async def poll_parallel_task(task_state: TaskState) -> None:
     log_exit("poll_parallel_task", {"status": task_state.status, "task_id": task_state.task_id})
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """
-    Handle tool calls.
+# ---------------------------------------------------------------------------
+# Tool definitions (MCPServer auto-generates input schemas from type hints)
+# ---------------------------------------------------------------------------
 
-    Parameters
-    ----------
-    name : str
-        Tool name
-    arguments : dict
-        Tool arguments
-
-    Returns
-    -------
-    list[TextContent]
-        Tool response
-    """
-    log_entry(f"call_tool:{name}", arguments)
-
-    if name == "quick_research":
-        return await quick_research(arguments.get("query"))
-
-    elif name == "deep_research":
-        return await deep_research(
-            arguments.get("query"),
-            arguments.get("processor", os.getenv("DEFAULT_PROCESSOR", "pro"))
-        )
-
-    elif name == "task_status":
-        return await task_status(arguments.get("task_id"))
-
-    elif name == "get_research_chunk":
-        return await get_research_chunk(
-            arguments.get("task_id"),
-            arguments.get("chunk")
-        )
-
-    else:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
-
-async def quick_research(query: str) -> list[TextContent]:
-    """
-    Quick research using Lite processor (5-60s, $5/1K queries).
-
-    Parameters
-    ----------
-    query : str
-        Research question
-
-    Returns
-    -------
-    list[TextContent]
-        Research result
-    """
+@server.tool(
+    name="quick_research",
+    description="Fast research using lite processor (5-60s, $5/1K). No approval required. Use for definitions, fact-checking, quick lookups.",
+)
+async def quick_research(query: str) -> str:
+    """Quick research using Lite processor."""
     log_entry("quick_research", {"query": query[:50] if query else ""})
 
     SystemLogger.info("Quick research request", {
@@ -417,10 +258,7 @@ async def quick_research(query: str) -> list[TextContent]:
     if parallel_client is None:
         SystemLogger.error("Parallel AI client not configured for quick research")
         log_exit("quick_research", {"status": "error"})
-        return [TextContent(
-            type="text",
-            text="ERROR: Parallel AI client not configured. Set PARALLEL_API_KEY in .env file."
-        )]
+        return "ERROR: Parallel AI client not configured. Set PARALLEL_API_KEY in .env file."
 
     try:
         start_time = datetime.now()
@@ -448,7 +286,6 @@ async def quick_research(query: str) -> list[TextContent]:
             else:
                 content = str(output_content)
 
-        # Calculate elapsed time
         elapsed_seconds = (datetime.now() - start_time).total_seconds()
         elapsed_str = f"{elapsed_seconds:.1f} seconds"
 
@@ -458,7 +295,6 @@ async def quick_research(query: str) -> list[TextContent]:
             "run_id": run.run_id
         })
 
-        # Format response with metadata
         response = f"""QUICK RESEARCH COMPLETE
 
 === METADATA ===
@@ -474,33 +310,23 @@ Content Length: {len(content)} chars
 """
 
         log_exit("quick_research", {"status": "complete", "run_id": run.run_id})
-        return [TextContent(type="text", text=response)]
+        return response
 
     except Exception as e:
         SystemLogger.error("Quick research failed", exception=e, context={
             "query": query[:50] if query else ""
         })
         log_exit("quick_research", {"status": "error"})
-        return [TextContent(type="text", text=f"ERROR: {str(e)}")]
+        return f"ERROR: {str(e)}"
 
 
-async def deep_research(query: str, processor: str = None) -> list[TextContent]:
-    """
-    Conduct deep research with async execution.
-
-    Parameters
-    ----------
-    query : str
-        Research question
-    processor : str, optional
-        Processor tier (defaults to DEFAULT_PROCESSOR from env)
-
-    Returns
-    -------
-    list[TextContent]
-        Task ID for status checking
-    """
-    if processor is None:
+@server.tool(
+    name="deep_research",
+    description="Comprehensive research with structured citations. Runs asynchronously (non-blocking). Use for complex technical decisions, comparisons, production pattern validation.",
+)
+async def deep_research(query: str, processor: str = "pro") -> str:
+    """Deep research with async execution and background polling."""
+    if not processor:
         processor = os.getenv("DEFAULT_PROCESSOR", "pro")
 
     log_entry("deep_research", {
@@ -515,41 +341,21 @@ async def deep_research(query: str, processor: str = None) -> list[TextContent]:
     })
 
     # Validate processor
-    valid_processors = [
-        "lite", "base", "core", "core2x", "pro",
-        "ultra", "ultra2x", "ultra4x", "ultra8x",
-    ]
-    if processor not in valid_processors:
+    if processor not in VALID_PROCESSORS:
         SystemLogger.warning(f"Invalid processor '{processor}', defaulting to 'pro'", {
             "requested_processor": processor,
-            "valid_processors": valid_processors,
+            "valid_processors": VALID_PROCESSORS,
             "default": "pro"
         })
         processor = "pro"
 
-    # Check client availability
     if parallel_client is None:
         SystemLogger.error("Parallel AI client not configured", context={
             "processor": processor,
             "help": "Set PARALLEL_API_KEY in .env file"
         })
         log_exit("deep_research", {"status": "error"})
-        return [TextContent(
-            type="text",
-            text="ERROR: Parallel AI client not configured. Set PARALLEL_API_KEY in .env file."
-        )]
-
-    # Cost and time estimates
-    cost_map = {
-        "lite": "$5", "base": "$10", "core": "$30", "core2x": "$60",
-        "pro": "$100", "ultra": "$300", "ultra2x": "$600",
-        "ultra4x": "$1,200", "ultra8x": "$2,400",
-    }
-    time_map = {
-        "lite": "5-60s", "base": "15-100s", "core": "1-5min", "core2x": "1-5min",
-        "pro": "3-9min", "ultra": "5-25min", "ultra2x": "5-25min",
-        "ultra4x": "8-30min", "ultra8x": "8-30min",
-    }
+        return "ERROR: Parallel AI client not configured. Set PARALLEL_API_KEY in .env file."
 
     # Create task
     task_id = str(uuid.uuid4())
@@ -566,22 +372,7 @@ async def deep_research(query: str, processor: str = None) -> list[TextContent]:
         "query_preview": query[:30]
     })
 
-    # Request approval via stdio (blocking for approval only)
-    approval_message = f"""RESEARCH APPROVAL REQUIRED
-
-Query: {query}
-Processor: {processor}
-Duration: {time_map.get(processor, "unknown")} (async - non-blocking)
-Cost: {cost_map.get(processor, "unknown")} per 1,000 queries
-
-Approve? This will run in background."""
-
-    # NOTE: In stdio mode, approval is synchronous. In full WebSocket mode,
-    # this would be async. For now, returning task_id immediately and user
-    # can check status.
-
     try:
-        # Execute research
         SystemLogger.info(f"Creating research run with processor '{processor}'", {
             "query_length": len(query),
             "processor": processor,
@@ -603,10 +394,15 @@ Approve? This will run in background."""
         asyncio.create_task(poll_parallel_task(task_state))
 
         log_exit("deep_research", {"status": "submitted", "task_id": task_id})
-        return [TextContent(
-            type="text",
-            text=f"Research task submitted (non-blocking)\n\nTask ID: {task_id}\nProcessor: {processor}\nDuration: {time_map.get(processor, 'unknown')}\n\nUse task_status tool to check progress.\nYou can continue working while research runs in background."
-        )]
+        return (
+            f"Research task submitted (non-blocking)\n\n"
+            f"Task ID: {task_id}\n"
+            f"Processor: {processor}\n"
+            f"Duration: {TIME_MAP.get(processor, 'unknown')}\n"
+            f"Cost: {COST_MAP.get(processor, 'unknown')} per 1,000 queries\n\n"
+            f"Use task_status tool to check progress.\n"
+            f"You can continue working while research runs in background."
+        )
 
     except Exception as e:
         SystemLogger.error("Research submission failed", exception=e, context={
@@ -617,99 +413,26 @@ Approve? This will run in background."""
         task_state.status = TaskStatus.FAILED
         task_state.error = str(e)
         log_exit("deep_research", {"status": "error", "task_id": task_id})
-        return [TextContent(type="text", text=f"ERROR: {str(e)}")]
+        return f"ERROR: {str(e)}"
 
 
-async def get_research_chunk(task_id: str, chunk: int) -> list[TextContent]:
-    """
-    Retrieve specific chunk from large research output.
-
-    Parameters
-    ----------
-    task_id : str
-        Task ID
-    chunk : int
-        Chunk number (1-indexed)
-
-    Returns
-    -------
-    list[TextContent]
-        Requested chunk
-    """
-    log_entry("get_research_chunk", {"task_id": task_id, "chunk": chunk})
-
-    if task_id not in task_queue:
-        return [TextContent(type="text", text=f"ERROR: Task {task_id} not found")]
-
-    task = task_queue[task_id]
-
-    if task.status != TaskStatus.COMPLETE:
-        return [TextContent(
-            type="text",
-            text=f"ERROR: Task {task_id} is not complete yet (status: {task.status})"
-        )]
-
-    result = task.result
-    total_chunks = result.get('total_chunks', 1)
-    chunks = result.get('chunks', [])
-
-    if chunk < 1 or chunk > total_chunks:
-        return [TextContent(
-            type="text",
-            text=f"ERROR: Invalid chunk number {chunk}. Valid range: 1-{total_chunks}"
-        )]
-
-    # Return requested chunk
-    chunk_index = chunk - 1
-    response = f"""RESEARCH CHUNK {chunk}/{total_chunks}
-
-Task ID: {task_id}
-Query: {task.query}
-Chunk: {chunk} of {total_chunks}
-
-=== CONTENT ===
-{chunks[chunk_index]}
-
-[End of chunk {chunk}/{total_chunks}]
-"""
-    log_exit("get_research_chunk", {"task_id": task_id, "chunk": chunk})
-    return [TextContent(type="text", text=response)]
-
-
-async def task_status(task_id: str) -> list[TextContent]:
-    """
-    Check status of async research task.
-
-    Parameters
-    ----------
-    task_id : str
-        Task ID
-
-    Returns
-    -------
-    list[TextContent]
-        Task status and result if complete
-    """
+@server.tool(
+    name="task_status",
+    description="Check status of async research task",
+)
+async def check_task_status(task_id: str) -> str:
+    """Check status of an async research task and return results if complete."""
     log_entry("task_status", {"task_id": task_id})
 
     if task_id not in task_queue:
-        return [TextContent(type="text", text=f"ERROR: Task {task_id} not found")]
+        return f"ERROR: Task {task_id} not found"
 
     task = task_queue[task_id]
 
-    # Expected duration map
-    time_map = {
-        "lite": "5-60s", "base": "15-100s", "core": "1-5min", "core2x": "1-5min",
-        "pro": "3-9min", "ultra": "5-25min", "ultra2x": "5-25min",
-        "ultra4x": "8-30min", "ultra8x": "8-30min",
-    }
-
     if task.status == TaskStatus.COMPLETE:
-        # Calculate elapsed time
         elapsed_seconds = (datetime.now() - task.created_at).total_seconds()
         elapsed_str = f"{elapsed_seconds/60:.1f} minutes" if elapsed_seconds >= 60 else f"{elapsed_seconds:.0f} seconds"
 
-        # Return result with metadata
         result = task.result
         total_chunks = result.get('total_chunks', 1)
         estimated_tokens = result.get('estimated_tokens', 0)
@@ -724,14 +447,13 @@ async def task_status(task_id: str) -> list[TextContent]:
                 citations_text += f"    - {cite['title']}: {cite['url']}\n"
 
         if total_chunks > 1:
-            # Large result - return chunked
             response = f"""RESEARCH COMPLETE (CHUNKED OUTPUT)
 
 === METADATA ===
 Task ID: {task_id}
 Query: {task.query}
 Processor: {task.processor}
-Expected Duration: {time_map.get(task.processor, 'unknown')}
+Expected Duration: {TIME_MAP.get(task.processor, 'unknown')}
 Actual Duration: {elapsed_str}
 Created: {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}
 Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -754,14 +476,13 @@ Example: get_research_chunk(task_id="{task_id}", chunk=2)
 {citations_text}
 """
         else:
-            # Small result - return complete
             response = f"""RESEARCH COMPLETE
 
 === METADATA ===
 Task ID: {task_id}
 Query: {task.query}
 Processor: {task.processor}
-Expected Duration: {time_map.get(task.processor, 'unknown')}
+Expected Duration: {TIME_MAP.get(task.processor, 'unknown')}
 Actual Duration: {elapsed_str}
 Created: {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}
 Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -775,27 +496,24 @@ Citation Groups: {len(result['citations'])}
 {citations_text}
 """
         log_exit("task_status", {"status": "complete", "task_id": task_id, "chunked": total_chunks > 1})
-        return [TextContent(type="text", text=response)]
+        return response
 
     elif task.status == TaskStatus.FAILED:
         elapsed_seconds = (datetime.now() - task.created_at).total_seconds()
         elapsed_str = f"{elapsed_seconds/60:.1f} minutes" if elapsed_seconds >= 60 else f"{elapsed_seconds:.0f} seconds"
 
         log_exit("task_status", {"status": "failed", "task_id": task_id})
-        return [TextContent(
-            type="text",
-            text=f"""RESEARCH FAILED
-
-Task ID: {task_id}
-Query: {task.query}
-Processor: {task.processor}
-Expected Duration: {time_map.get(task.processor, 'unknown')}
-Failed After: {elapsed_str}
-Error: {task.error}"""
-        )]
+        return (
+            f"RESEARCH FAILED\n\n"
+            f"Task ID: {task_id}\n"
+            f"Query: {task.query}\n"
+            f"Processor: {task.processor}\n"
+            f"Expected Duration: {TIME_MAP.get(task.processor, 'unknown')}\n"
+            f"Failed After: {elapsed_str}\n"
+            f"Error: {task.error}"
+        )
 
     else:
-        # Still running - show elapsed time vs expected
         if task.started_at:
             elapsed_seconds = (datetime.now() - task.started_at).total_seconds()
             elapsed_str = f"{elapsed_seconds/60:.1f} minutes" if elapsed_seconds >= 60 else f"{elapsed_seconds:.0f} seconds"
@@ -803,31 +521,87 @@ Error: {task.error}"""
             elapsed_str = "Not started yet"
 
         log_exit("task_status", {"status": task.status, "task_id": task_id})
-        return [TextContent(
-            type="text",
-            text=f"""RESEARCH IN PROGRESS
+        return (
+            f"RESEARCH IN PROGRESS\n\n"
+            f"Task ID: {task_id}\n"
+            f"Query: {task.query}\n"
+            f"Processor: {task.processor}\n"
+            f"Status: {task.status}\n"
+            f"Expected Duration: {TIME_MAP.get(task.processor, 'unknown')}\n"
+            f"Elapsed Time: {elapsed_str}\n"
+            f"Created: {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Run ID: {task.run_id}\n\n"
+            f"Still researching... Check back in 30s."
+        )
+
+
+@server.tool(
+    name="get_research_chunk",
+    description="Retrieve specific chunk from large research output. Use when research result was split into multiple chunks.",
+)
+async def get_research_chunk(task_id: str, chunk: int) -> str:
+    """Retrieve a specific chunk from a large research result."""
+    log_entry("get_research_chunk", {"task_id": task_id, "chunk": chunk})
+
+    if task_id not in task_queue:
+        return f"ERROR: Task {task_id} not found"
+
+    task = task_queue[task_id]
+
+    if task.status != TaskStatus.COMPLETE:
+        return f"ERROR: Task {task_id} is not complete yet (status: {task.status})"
+
+    result = task.result
+    total_chunks = result.get('total_chunks', 1)
+    chunks = result.get('chunks', [])
+
+    if chunk < 1 or chunk > total_chunks:
+        return f"ERROR: Invalid chunk number {chunk}. Valid range: 1-{total_chunks}"
+
+    chunk_index = chunk - 1
+    response = f"""RESEARCH CHUNK {chunk}/{total_chunks}
 
 Task ID: {task_id}
 Query: {task.query}
-Processor: {task.processor}
-Status: {task.status}
-Expected Duration: {time_map.get(task.processor, 'unknown')}
-Elapsed Time: {elapsed_str}
-Created: {task.created_at.strftime('%Y-%m-%d %H:%M:%S')}
-Run ID: {task.run_id}
+Chunk: {chunk} of {total_chunks}
 
-Still researching... Check back in 30s."""
-        )]
+=== CONTENT ===
+{chunks[chunk_index]}
+
+[End of chunk {chunk}/{total_chunks}]
+"""
+    log_exit("get_research_chunk", {"task_id": task_id, "chunk": chunk})
+    return response
 
 
-async def main():
-    """Initialize and run MCP server."""
+# ---------------------------------------------------------------------------
+# Prompt definitions
+# ---------------------------------------------------------------------------
+
+@server.prompt(
+    name="research_session_start",
+    description="Start research session",
+)
+async def research_session_start() -> str:
+    """Provide an overview of available research tools."""
+    return """Research tools available:
+
+- quick_research: Fast lookups (5-60s, no approval)
+- deep_research: Comprehensive research with citations (async, approval required)
+
+Deep research runs in background. Submit query, continue working, check results later."""
+
+
+# ---------------------------------------------------------------------------
+# Initialization and entry point
+# ---------------------------------------------------------------------------
+
+def init_parallel_client():
+    """Initialize the Parallel AI client from environment."""
     global parallel_client
 
-    log_entry("main")
-
     api_key = os.getenv("PARALLEL_API_KEY")
-    SystemLogger.info("Initializing Parallel AI MCP Server (WebSocket)", {
+    SystemLogger.info("Initializing Parallel AI MCP Server", {
         "api_key_configured": bool(api_key and api_key != "your_parallel_api_key_here"),
         "default_processor": os.getenv("DEFAULT_PROCESSOR", "pro")
     })
@@ -862,31 +636,25 @@ async def main():
             )
             parallel_client = None
 
+
+async def main():
+    """Initialize and run MCP server."""
+    log_entry("main")
+
+    init_parallel_client()
+
     SystemLogger.info("Starting MCP server with stdio transport", {
-        "timeout": 360,
         "default_processor": os.getenv('DEFAULT_PROCESSOR', 'pro'),
         "parallel_configured": parallel_client is not None
     })
 
-    print("Starting Parallel AI MCP Server (WebSocket-Ready)...")
-    print(f"Default Processor: {os.getenv('DEFAULT_PROCESSOR', 'pro')}")
-    print(f"Logs directory: logs/")
-    print(f"Async task execution enabled")
-
-    # Run with stdio transport (Claude Desktop standard)
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    await server.run_stdio_async()
 
     log_exit("main", {})
 
 
 if __name__ == "__main__":
     SystemLogger.info("Starting Parallel AI MCP Server", {
-        "timeout": 360,
         "default_processor": os.getenv('DEFAULT_PROCESSOR', 'pro'),
         "api_key_configured": bool(os.getenv("PARALLEL_API_KEY"))
     })
