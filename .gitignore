@@ -44,6 +44,8 @@ logs/
 # MCP
 .mcp/
 
-# Development files
+# Agentic files (local project context -- never commit)
 CLAUDE.md
+MEMORY.md
+ANTIPATTERNS.md
 claude_desktop_config.json
