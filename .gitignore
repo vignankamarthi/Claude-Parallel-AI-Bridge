@@ -46,6 +46,6 @@ logs/
 
 # Agentic files (local project context -- never commit)
 CLAUDE.md
-MEMORY.md
 ANTIPATTERNS.md
+MEMORY.md
 claude_desktop_config.json
